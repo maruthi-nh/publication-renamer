@@ -1,0 +1,26 @@
+# Rust build output
+/target/
+
+# Local Codex/agent state and credentials
+/.agents/
+/.codex/
+/.aws/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Coverage and profiling output
+*.profraw
+*.profdata
+/coverage/
