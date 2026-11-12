@@ -33,6 +33,9 @@ enum Command {
         /// Never make network requests (the default; useful for explicit scripts).
         #[arg(long, conflicts_with = "enrich")]
         offline: bool,
+        /// OCR the first three pages locally when metadata remains incomplete.
+        #[arg(long)]
+        ocr: bool,
     },
     /// Preview renames (or execute with --apply). Accepts a PDF or directory.
     Rename {
@@ -67,6 +70,9 @@ enum Command {
         /// Never make network requests (the default; useful for explicit scripts).
         #[arg(long, conflicts_with = "enrich")]
         offline: bool,
+        /// OCR the first three pages locally when metadata remains incomplete.
+        #[arg(long)]
+        ocr: bool,
     },
 }
 
@@ -89,8 +95,9 @@ fn main() -> Result<()> {
             json,
             enrich,
             offline: _,
+            ocr,
         } => {
-            let meta = metadata::extract(&pdf, enrich)?;
+            let meta = metadata::extract(&pdf, enrich, ocr)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&meta)?);
             } else {
@@ -146,6 +153,7 @@ fn main() -> Result<()> {
             authors,
             enrich,
             offline: _,
+            ocr,
         } => {
             let options = RenameOptions {
                 apply,
@@ -165,6 +173,7 @@ fn main() -> Result<()> {
                     authors,
                 },
                 enrich,
+                ocr,
             };
             operations::run_rename(&path, options)?;
         }

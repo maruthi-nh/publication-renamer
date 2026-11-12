@@ -25,12 +25,18 @@ pdfname inspect ~/Downloads/example.pdf --json
 # Extract a DOI from the first three pages and resolve it through Crossref
 pdfname inspect ~/Downloads/article.pdf --enrich
 
+# Offline fallback; OCR image-only pages when necessary
+pdfname inspect ~/Downloads/scanned-article.pdf --offline --ocr
+
 # Preview; NO files are modified by default
 pdfname rename ~/Downloads/example.pdf
 pdfname rename ~/Documents/PDFs --recursive
 
 # Enrich papers with blank embedded metadata before planning the rename
 pdfname rename ~/Downloads/article.pdf --enrich
+
+# OCR is still preview-first and never enables network access
+pdfname rename ~/Downloads/scanned-article.pdf --offline --ocr
 
 # Execute a previewed plan
 pdfname rename ~/Documents/PDFs --recursive --apply
@@ -53,6 +59,14 @@ pdfname rename ~/Documents/PDFs --recursive --conflict suffix --apply
 
 - Without `--enrich`, operation is offline. The first three pages are still
   examined locally for a DOI, with an 8 MiB decompression limit per page.
+- When embedded metadata is incomplete, layout-preserving first-page text is
+  parsed conservatively for journal articles. This requires Poppler's
+  `pdftotext` command.
+- `--ocr` renders at most the first three pages with `pdftoppm` and processes
+  them with Tesseract (`eng`). OCR runs only if metadata remains incomplete.
+  Install the `poppler-utils` and `tesseract-ocr` system packages to use it.
+- Locally inferred fields include their provenance and produce a warning. Always
+  review the default dry run before combining `--ocr` with `--apply`.
 - With `--enrich`, a detected DOI is resolved through Crossref. Crossref title,
   publisher, publication date, and authors replace incomplete embedded values.
 - Crossref requests have short connection/read timeouts. Lookup failures become
@@ -65,8 +79,9 @@ pdfname rename ~/Documents/PDFs --recursive --conflict suffix --apply
 - Explicit command-line overrides win.
 
 PDF Info, XMP, and metadata embedded by publishers are often incomplete or
-inaccurate. DOI/Crossref enrichment is opt-in. General first-page field parsing,
-OCR, ISBN resolution, and cross-validation are not yet included.
+inaccurate. DOI/Crossref enrichment is opt-in. Offline first-page parsing is
+deliberately conservative and currently targets common journal layouts and
+publishers. ISBN resolution and broader cross-validation are not yet included.
 
 ## Safety
 
@@ -85,7 +100,7 @@ OCR, ISBN resolution, and cross-validation are not yet included.
 ## Roadmap
 
 1. Filename template support, configuration (`~/.config/pdfname/config.toml`), Unicode normalization.
-2. First-page field parsing and interactive review of ambiguous candidates.
+2. Broader first-page layouts and interactive review of ambiguous candidates.
 3. ISBN identification; OpenAlex / Open Library adapters; source confidence and validation.
 4. Optional persistent cache, undo manifest, planned batches, safe Windows/macOS/Linux no-replace moves, and JSON batch plans for agent integration.
 

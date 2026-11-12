@@ -63,6 +63,7 @@ pub struct RenameOptions {
     pub conflict: ConflictPolicy,
     pub overrides: Overrides,
     pub enrich: bool,
+    pub ocr: bool,
 }
 
 fn is_pdf(path: &Path) -> bool {
@@ -174,7 +175,7 @@ pub fn run_rename(input: &Path, options: RenameOptions) -> Result<()> {
     let mut skipped = 0usize;
     let mut errors = 0usize;
     for source in sources {
-        let mut meta = match extract(&source, options.enrich) {
+        let mut meta = match extract(&source, options.enrich, options.ocr) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("ERROR {}: {e:#}", source.display());

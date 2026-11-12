@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use lopdf::{Document, LoadOptions, Object};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{fs, path::Path, process::Command};
 
 const DC: &str = "http://purl.org/dc/elements/1.1/";
 const DCTERMS: &str = "http://purl.org/dc/terms/";
@@ -65,6 +65,171 @@ fn extract_first_pages(pdf: &Document, count: usize) -> Result<String> {
     }
     pdf.extract_text_with_limit(&numbers, PAGE_TEXT_LIMIT)
         .context("cannot extract text from the first pages")
+}
+
+fn layout_text_first_pages(path: &Path, count: usize) -> Result<String> {
+    let output = Command::new("pdftotext")
+        .args(["-f", "1", "-l", &count.to_string(), "-layout"])
+        .arg(path)
+        .arg("-")
+        .output()
+        .context("cannot run pdftotext; install Poppler for offline first-page inference")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "pdftotext failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if output.stdout.len() > 2 * 1024 * 1024 {
+        anyhow::bail!("first-page text exceeded the 2 MiB safety limit");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn ocr_first_pages(path: &Path, count: usize) -> Result<String> {
+    let temp = tempfile::tempdir().context("cannot create OCR temporary directory")?;
+    let prefix = temp.path().join("page");
+    let rendered = Command::new("pdftoppm")
+        .args(["-f", "1", "-l", &count.to_string(), "-r", "200", "-png"])
+        .arg(path)
+        .arg(&prefix)
+        .output()
+        .context("cannot run pdftoppm; install Poppler to use --ocr")?;
+    if !rendered.status.success() {
+        anyhow::bail!(
+            "pdftoppm failed: {}",
+            String::from_utf8_lossy(&rendered.stderr).trim()
+        );
+    }
+
+    let mut images = fs::read_dir(temp.path())?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .collect::<Vec<_>>();
+    images.sort();
+    let mut text = String::new();
+    for image in images {
+        let output = Command::new("tesseract")
+            .arg(&image)
+            .arg("stdout")
+            .arg("-l")
+            .arg("eng")
+            .output()
+            .context("cannot run tesseract; install Tesseract OCR to use --ocr")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tesseract failed for {}: {}",
+                image.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        if text.len() + output.stdout.len() > 2 * 1024 * 1024 {
+            anyhow::bail!("OCR output exceeded the 2 MiB safety limit");
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+        text.push('\n');
+    }
+    if text.trim().is_empty() {
+        anyhow::bail!("OCR produced no text");
+    }
+    Ok(text)
+}
+
+fn looks_like_author_line(line: &str) -> bool {
+    if !line.contains(',') || line.len() > 350 {
+        return false;
+    }
+    authors_from_line(line).len() >= 2
+}
+
+fn is_title_candidate(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    line.len() >= 12
+        && line.len() <= 300
+        && line.chars().any(char::is_alphabetic)
+        && !lower.contains("journal homepage")
+        && !lower.contains("contents lists available")
+        && !lower.starts_with("http")
+        && !lower.starts_with("doi:")
+}
+
+fn authors_from_line(line: &str) -> Vec<String> {
+    let author = Regex::new(
+        r"(?x)
+        (?:[A-Z]\.?(?:\s*)){1,4}[A-Z][\p{L}'’-]{2,}(?:\s+[A-Z][\p{L}'’-]{2,}){0,2}
+        |
+        [A-Z][\p{L}'’-]{2,}(?:\s+[A-Z][\p{L}'’-]{2,}){1,2}",
+    )
+    .expect("valid regex");
+    author
+        .find_iter(line)
+        .filter_map(|value| nonempty(value.as_str()))
+        .collect()
+}
+
+/// Conservative journal-front-page fallback. It only fills absent fields and
+/// marks every value as inferred so users can inspect the dry run before apply.
+fn merge_first_page_text(meta: &mut BookMetadata, text: &str, source: &'static str) {
+    if meta.doi.is_none() {
+        meta.doi = find_doi(text).map(|doi| Field::new(doi, source));
+    }
+    let lines = text.lines().filter_map(nonempty).collect::<Vec<_>>();
+    let author_index = lines.iter().position(|line| looks_like_author_line(line));
+    if let Some(index) = author_index {
+        if meta.title.is_none() {
+            if let Some(title) = lines[..index]
+                .iter()
+                .rev()
+                .find(|line| is_title_candidate(line))
+            {
+                meta.title = Some(Field::new(title.clone(), source));
+            }
+        }
+        if meta.authors.is_empty() {
+            let authors = authors_from_line(&lines[index]);
+            if authors.len() >= 2 {
+                meta.authors = authors;
+                meta.authors_source = Some(source);
+            }
+        }
+    }
+    if meta.year.is_none() {
+        let year_re = Regex::new(r"(?:^|[^0-9])((?:19|20)\d{2})(?:[^0-9]|$)").expect("valid regex");
+        meta.year = lines.iter().take(25).find_map(|line| {
+            year_re
+                .captures(line)?
+                .get(1)?
+                .as_str()
+                .parse()
+                .ok()
+                .map(|year| Field::new(year, source))
+        });
+    }
+    if meta.publisher.is_none() {
+        let publisher_re = Regex::new(
+            r"(?i)\b(Elsevier(?:\s+BV)?|Springer(?: Nature)?|Wiley|IEEE|Taylor & Francis|SAGE|Oxford University Press|Cambridge University Press|ACM)\b",
+        ).expect("valid regex");
+        meta.publisher = lines.iter().find_map(|line| {
+            let value = publisher_re.captures(line)?.get(1)?.as_str();
+            let publisher = match value.to_ascii_lowercase().as_str() {
+                value if value.starts_with("elsevier") => "Elsevier".to_string(),
+                value if value.starts_with("springer") => "Springer Nature".to_string(),
+                "wiley" => "Wiley".to_string(),
+                "ieee" => "IEEE".to_string(),
+                "sage" => "SAGE".to_string(),
+                "acm" => "ACM".to_string(),
+                _ => value.to_string(),
+            };
+            Some(Field::new(publisher, source))
+        });
+    }
+}
+
+fn metadata_incomplete(meta: &BookMetadata) -> bool {
+    meta.title.is_none()
+        || meta.publisher.is_none()
+        || meta.year.is_none()
+        || meta.authors.is_empty()
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,7 +532,7 @@ pub fn parse_xmp(xml: &str, meta: &mut BookMetadata) -> Result<()> {
     Ok(())
 }
 
-pub fn extract(path: &Path, enrich: bool) -> Result<BookMetadata> {
+pub fn extract(path: &Path, enrich: bool, ocr: bool) -> Result<BookMetadata> {
     // 32 MiB per decoded stream bounds decompression bombs while loading.
     let options = LoadOptions::with_max_decompressed_size(STREAM_LIMIT);
     let pdf = Document::load_with_options(path, options)
@@ -407,7 +572,31 @@ pub fn extract(path: &Path, enrich: bool) -> Result<BookMetadata> {
         }
         Err(e) => meta
             .warnings
-            .push(format!("First-page text ignored: {e:#}")),
+            .push(format!("Internal text extraction ignored: {e:#}")),
+    }
+
+    if metadata_incomplete(&meta) {
+        match layout_text_first_pages(path, 3) {
+            Ok(text) => merge_first_page_text(&mut meta, &text, "poppler:first-page"),
+            Err(e) => meta
+                .warnings
+                .push(format!("First-page inference unavailable: {e:#}")),
+        }
+    }
+    if metadata_incomplete(&meta) && ocr {
+        match ocr_first_pages(path, 3) {
+            Ok(text) => merge_first_page_text(&mut meta, &text, "ocr:first-page"),
+            Err(e) => meta.warnings.push(format!("OCR failed: {e:#}")),
+        }
+    }
+    if meta
+        .title
+        .as_ref()
+        .is_some_and(|field| matches!(field.source, "poppler:first-page" | "ocr:first-page"))
+    {
+        meta.warnings.push(
+            "Metadata inferred from first-page text/OCR; verify the preview before --apply".into(),
+        );
     }
     if enrich {
         if meta.doi.is_some() {
@@ -480,5 +669,27 @@ mod tests {
         assert_eq!(meta.publisher.unwrap().value, "Elsevier BV");
         assert_eq!(meta.authors, ["K. S. Shrinath"]);
         assert_eq!(meta.year.unwrap().value, 2023);
+    }
+
+    #[test]
+    fn first_page_fallback_recovers_article_fields() {
+        let text = r#"
+Computers and Fluids 250 (2023) 105702
+Contents lists available at ScienceDirect
+A Kinetic Flux Difference Splitting method for compressible flows
+K.S. Shrinath, N.H. Maruthi, S.V. Raghurama Rao, Veeredhi Vasudeva Rao
+https://doi.org/10.1016/j.compfluid.2022.105702
+0045-7930 / © 2022 Elsevier Ltd. All rights reserved.
+"#;
+        let mut meta = BookMetadata::default();
+        merge_first_page_text(&mut meta, text, "test:first-page");
+        assert_eq!(
+            meta.title.unwrap().value,
+            "A Kinetic Flux Difference Splitting method for compressible flows"
+        );
+        assert_eq!(meta.authors.len(), 4);
+        assert_eq!(meta.publisher.unwrap().value, "Elsevier");
+        assert_eq!(meta.year.unwrap().value, 2023);
+        assert_eq!(meta.doi.unwrap().value, "10.1016/j.compfluid.2022.105702");
     }
 }
