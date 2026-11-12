@@ -15,6 +15,35 @@ cargo test
 
 Binary: `target/release/pdfname` (`.exe` on Windows).
 
+Offline first-page extraction uses Poppler. OCR additionally uses Tesseract.
+For Debian/Ubuntu:
+
+```bash
+sudo apt install poppler-utils tesseract-ocr
+```
+
+Poppler is used automatically when embedded metadata is incomplete. Tesseract
+is only invoked when `--ocr` is supplied and fields are still missing.
+
+## Quick start
+
+Always preview first; `rename` does not modify anything without `--apply`:
+
+```bash
+# Fully offline preview
+./target/release/pdfname rename \
+  ~/Downloads/A_Kinetic_Flux_Difference_Splitting_meth.pdf \
+  --offline
+
+# Apply the exact previewed rename
+./target/release/pdfname rename \
+  ~/Downloads/A_Kinetic_Flux_Difference_Splitting_meth.pdf \
+  --offline --apply
+```
+
+For a scanned/image-only PDF, add `--ocr` to both commands. For DOI metadata
+from Crossref, use `--enrich` instead of `--offline`.
+
 ## Commands
 
 ```bash
@@ -97,6 +126,40 @@ publishers. ISBN resolution and broader cross-validation are not yet included.
 - XMP `dc:date` is not guaranteed to mean publication year; inspect its warning before applying.
 - Directory rename loops process one PDF at a time and report errors without halting other files.
 
+## Troubleshooting
+
+### `No such file or directory (os error 2)`
+
+The path passed to `pdfname` does not exist. After a successful `--apply`, the
+old path is expected to disappear because the file now has its generated name.
+Find likely matches with:
+
+```bash
+find ~/Downloads -maxdepth 1 -type f -iname '*Kinetic*Flux*Difference*'
+```
+
+Quote filenames containing spaces:
+
+```bash
+./target/release/pdfname inspect \
+  "$HOME/Downloads/A Kinetic Flux Difference Splitting method for compressible flows - Elsevier - 2023 - K.S. Shrinath, N.H. Maruthi, S.V. Raghurama Rao, Veeredhi Vasudeva Rao.pdf" \
+  --offline
+```
+
+### OCR is unavailable
+
+If `--ocr` reports that `pdftoppm` or `tesseract` cannot be run, install
+Poppler and Tesseract as shown in the Build section. OCR is local and does not
+require internet access.
+
+### Rebuild after pulling changes
+
+The release binary is not rebuilt automatically when source files change:
+
+```bash
+cargo build --release
+```
+
 ## Roadmap
 
 1. Filename template support, configuration (`~/.config/pdfname/config.toml`), Unicode normalization.
@@ -104,6 +167,12 @@ publishers. ISBN resolution and broader cross-validation are not yet included.
 3. ISBN identification; OpenAlex / Open Library adapters; source confidence and validation.
 4. Optional persistent cache, undo manifest, planned batches, safe Windows/macOS/Linux no-replace moves, and JSON batch plans for agent integration.
 
-## Note on builds
+## Verification
 
-This source archive was prepared in an environment without `cargo` or `rustc`; it has not been compilation-tested here. Run `cargo test` on your machine before using `--apply` on important files.
+The project is checked with:
+
+```bash
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
